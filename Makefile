@@ -24,7 +24,7 @@ build:
 
 .PHONY:	build.amd64
 build.amd64:
-	GOOS=linux$(BUILDENVVAR) GOARCH=amd64 go build -o bin/load-watcher main.go
+	GOOS=linux $(BUILDENVVAR) GOARCH=amd64 go build -o bin/load-watcher main.go
 
 .PHONY:	build.arm64
 build.arm64:

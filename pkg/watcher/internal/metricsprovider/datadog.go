@@ -254,11 +254,18 @@ func getMetricsFromTimeSeriesResponse(resp datadogV2.TimeseriesFormulaQueryRespo
 		return metrics, errors.New("No values from timeseries attributes.")
 	}
 
+	// The number of series should match with the number of values since each series corresponds to
+	// an array of values across time intervals. If they don't match, return error and empty metrics.
+	if len(*timeSeriesDataSeriesPtr) != len(*timeSeriesDataValuesPtr) {
+		errMsg := "Number of series does not match number of values in timeseries response."
+		log.Error(errMsg)
+		return metrics, errors.New(errMsg)
+	}
+
 	hosts := make([]string, len(*timeSeriesDataSeriesPtr))
 	isCPU := make([]bool, len(*timeSeriesDataSeriesPtr))
-	index := 0
 	// Populate host array and corresponding query index
-	for _, timeSeriesDataSeries := range *timeSeriesDataSeriesPtr {
+	for index, timeSeriesDataSeries := range *timeSeriesDataSeriesPtr {
 		queryIndex, ok := timeSeriesDataSeries.GetQueryIndexOk()
 		if !ok {
 			log.Error("Error when getting query index from timeseries series.")
@@ -268,7 +275,6 @@ func getMetricsFromTimeSeriesResponse(resp datadogV2.TimeseriesFormulaQueryRespo
 			log.Error("No query index from timeseries series.")
 			continue
 		}
-		isCPU[index] = (*queryIndex == 0)
 		groupTagsPtr, ok := timeSeriesDataSeries.GetGroupTagsOk()
 		if !ok {
 			log.Error("Error when getting group tags from timeseries series.")
@@ -278,20 +284,37 @@ func getMetricsFromTimeSeriesResponse(resp datadogV2.TimeseriesFormulaQueryRespo
 			log.Error("No group tags from timeseries series.")
 			continue
 		}
-		for _, groupTags := range *groupTagsPtr {
-			log.Debugf("%v\n", groupTags)
-			hosts[index] = getHostName(groupTags)
-			index++
+
+		host := ""
+		// Iterate through group tags to find host tag since group by can be on multiple tags.
+		// We will use the value in host tag as the hostname for the metric. If host tag is
+		// not found, we will log an error and skip this series.
+		for _, groupTag := range *groupTagsPtr {
+			log.Debugf("%v\n", groupTag)
+			// ignore host:not-set since datadog returns this value when host tag is missing,
+			// and we want to avoid using not-set as a host identifier
+			if strings.HasPrefix(groupTag, "host:") {
+				parsedHost := getHostName(groupTag)
+				if parsedHost != "" && parsedHost != "not-set" {
+					host = parsedHost
+					break
+				}
+			}
 		}
+		// If host tag is not found, log an error and skip this series since we won't be able
+		// to identify which host this metric belongs to.
+		if host == "" {
+			log.Errorf(
+				"No valid host tag found. queryIndex=%d groupTags=%v",
+				*queryIndex,
+				*groupTagsPtr)
+			continue
+		}
+
+		hosts[index] = host
+		isCPU[index] = (*queryIndex == 0)
 	}
 
-	if len(hosts) != len(*timeSeriesDataValuesPtr) {
-		errMsg := "Number of group tags does not match number of values in timeseries series."
-		log.Error(errMsg)
-		return metrics, errors.New(errMsg)
-	}
-	// Find the average across returned values per 1 minute resolution
-	// Build a hostname map of array of metrics [CPU, memory]
 	hostIndex := 0
 	for _, timesSeriesDataValues := range *timeSeriesDataValuesPtr {
 		sum := 0.0
@@ -302,6 +325,16 @@ func getMetricsFromTimeSeriesResponse(resp datadogV2.TimeseriesFormulaQueryRespo
 				count += 1
 			}
 		}
+		// If count is 0, it means all values for this series are nil. This can happen
+		// when there is no data for the host during the time window. We will log an
+		// error and skip this host since we don't want to add a metric with value 0
+		// which can be misleading.
+		if count == 0 {
+			log.Errorf("No non-nil metric values for host %s", hosts[hostIndex])
+			hostIndex++
+			continue
+		}
+
 		fetchedMetric := watcher.Metric{Value: sum / count}
 		addDatadogMetadata(&fetchedMetric, isCPU[hostIndex])
 		metrics[hosts[hostIndex]] = append(metrics[hosts[hostIndex]], fetchedMetric)

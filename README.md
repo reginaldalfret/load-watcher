@@ -8,6 +8,7 @@ The following metrics provider clients are currently supported:
 1) SignalFx
 2) Kubernetes Metrics Server
 3) Prometheus
+4) Datadog
 
 These clients fetch CPU usage currently, support for other resources will be added later as needed.
 
@@ -19,10 +20,39 @@ The default `main.go` is configured to watch Kubernetes Metrics Server.
 You can change this to any available metrics provider in `pkg/metricsprovider`.
 To build a client for new metrics provider, you will need to implement `FetcherClient` interface.
 
-From the root folder, run the following commands to build docker image of load watcher, tag it and push to your docker repository:
+## Building behind a corporate TLS proxy
+
+Some corporate environments may fail during Go module downloads or base image pulls with errors such as:
+
+```text
+x509: certificate signed by unknown authority
+
+Export the corporate root CA certificate:
+
+security find-certificate -c "PayPal Crypto Mgt Corp Root CA" -p \
+  /Library/Keychains/System.keychain > paypal-crypto-root-ca.crt
+
+From the root folder, build the load-watcher image using Docker BuildKit:
+
+docker buildx build \
+  --platform linux/amd64 \
+  --secret id=corp_ca,src="$(pwd)/paypal-crypto-root-ca.crt" \
+  --build-arg BUILD_SPEC=build.amd64 \
+  --build-arg GOPROXY=direct \
+  --build-arg GOSUMDB=off \
+  --load \
+  -t load-watcher:<version> \
+  .
+
+Notes:
+
+corp_ca is an optional BuildKit secret used to install the corporate root CA inside the builder container.
+GOPROXY=direct and GOSUMDB=off can help in environments where access to proxy.golang.org is restricted.
+linux/arm64 builds succeed locally. linux/amd64 builds on Apple Silicon/Rancher Desktop can intermittently hit Go compiler segmentation faults under emulation, so amd64 images should be validated on CI or an amd64 runner.
+
+Tag the docker image and push to your docker repository:
 
 ```
-docker build -t load-watcher:<version> .
 docker tag load-watcher:<version> <your-docker-repo>:<version>
 docker push <your-docker-repo>
 ```
@@ -43,6 +73,8 @@ This will return metrics for all nodes. A query parameter to filter by host can 
 
 - To use the SignalFx client, please configure environment variables `METRICS_PROVIDER_NAME`, `METRICS_PROVIDER_ADDRESS` and `METRICS_PROVIDER_TOKEN` to `SignalFx`, SignalFx address and auth token respectively. Default value of address set is `https://api.signalfx.com` for SignalFx client.
   
+- To use the Datadog client, configure `METRICS_PROVIDER_NAME`, `METRICS_PROVIDER_ADDRESS`, `METRICS_PROVIDER_TOKEN`, `METRICS_PROVIDER_APP_KEY`, `DATADOG_ClUSTER_FILTER`, and `DATADOG_CLUSTER_NAME`.
+
 ## Deploy `load-watcher` as a service
 To deploy `load-watcher` as a monitoring service in your Kubernetes cluster, you should replace the values in the `[]` with your own cluster monitoring stack and then you can run the following.
 ```bash
